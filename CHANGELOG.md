@@ -10,3 +10,14 @@
   and the 401 challenge, and `IdentityGate` for `node:http` servers with the
   `legacyBearerOk` and `mintInternalToken` adapters. Same settings, rules and
   reason strings as the Python library bb-mcp-identity-py 0.1.0.
+- Hardening from the first review pass: `VERIFIER_TOKEN` is required unless
+  the mode is off and the broker URLs must be https (plain http for loopback
+  only); an empty setting counts as unset and integers are parsed strictly;
+  the fetched key set is replaced on every successful JWKS fetch so a rotated
+  out key stops verifying, and JWKS members marked for encryption are ignored;
+  a malformed snapshot entry is treated as absent; the WWW-Authenticate realm
+  and error values cannot carry quotes or line breaks; a throwing verifier or
+  callback answers 500 instead of hanging the request; service principal files
+  reject impossible dates, duplicate names and reused tokens, and a configured
+  but missing file is reported through `warn`; `mcpPath: '/'` gates every path.
+- Integration guide for the two TypeScript servers (`docs/INTEGRATION_NODE_HTTP.md`).

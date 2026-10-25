@@ -10,11 +10,11 @@
  *
  *   createServer(async (req, res) => {
  *     const outcome = await gate.handle(req, res);
- *     if (outcome.kind === 'handled') return;           // metadata document or 401 already written
+ *     if (outcome.kind === 'handled') return;           // metadata document, 401 or 500 already written
  *     ...the server's existing request handling...
  *   });
  *
- * Behaviour on `mcpPath`:
+ * Behaviour on `mcpPath` (and everything under it):
  *   no bearer                    -> 401 + WWW-Authenticate (resource_metadata=...)   { kind: 'handled' }
  *   broker token, verified       -> { kind: 'principal' }; `gate.principalOf(req)` returns it; with
  *                                   `mintInternalToken` the Authorization header is replaced by the
@@ -23,10 +23,14 @@
  *   not a broker token, enabled  -> `legacyBearerOk(bearer)` true: { kind: 'legacy' }, request untouched;
  *                                   false: 401                                        { kind: 'handled' }
  *   not a broker token, required -> 401                                               { kind: 'handled' }
+ *   verifier or callback threw   -> 500 (fail closed; the error is logged)            { kind: 'handled' }
  *
  * Also serves `/.well-known/oauth-protected-resource` and the same document
  * with the MCP path appended. Every other path, and every request while the
- * mode is `off`, is { kind: 'pass' }.
+ * mode is `off`, is { kind: 'pass' }. The gate matches `req.url` the way the
+ * servers' own routers do (query string removed, nothing else normalised), so
+ * a request the inner router treats as the MCP endpoint is the one the gate
+ * sees as such.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -42,7 +46,7 @@ export interface GateOptions {
   legacyBearerOk?: LegacyCheck;
   mintInternalToken?: Minter;
   scopesSupported?: readonly string[];
-  /** Receives one line per refusal with the stable reason; never the token. */
+  /** Receives one line per refusal or failure with the stable reason; never the token. */
   log?: (message: string, fields: Record<string, unknown>) => void;
 }
 
@@ -82,10 +86,14 @@ export class IdentityGate {
   private readonly legacyBearerOk: LegacyCheck | null;
   private readonly mintInternalToken: Minter | null;
   private readonly scopesSupported: readonly string[];
-  private readonly log: (message: string, fields: Record<string, unknown>) => void;
+  private readonly logImpl: (message: string, fields: Record<string, unknown>) => void;
   private readonly principals = new WeakMap<IncomingMessage, Principal>();
+  /** Requests that carried a verified broker token. */
   verified = 0;
+  /** Broker tokens (or non-legacy bearers) refused with a 401; a missing bearer is not counted. */
   denied = 0;
+  /** Requests answered 500 because the verifier or a callback threw. */
+  errors = 0;
 
   constructor(verifier: Verifier, options: GateOptions = {}) {
     this.verifier = verifier;
@@ -93,12 +101,25 @@ export class IdentityGate {
     this.legacyBearerOk = options.legacyBearerOk ?? null;
     this.mintInternalToken = options.mintInternalToken ?? null;
     this.scopesSupported = options.scopesSupported ?? [];
-    this.log = options.log ?? (() => undefined);
+    this.logImpl = options.log ?? (() => undefined);
   }
 
   /** The principal verified for this request, if the gate verified one. */
   principalOf(req: IncomingMessage): Principal | undefined {
     return this.principals.get(req);
+  }
+
+  private log(message: string, fields: Record<string, unknown>): void {
+    try {
+      this.logImpl(message, fields);
+    } catch {
+      // a logging failure never changes the outcome
+    }
+  }
+
+  private ownsPath(path: string): boolean {
+    if (this.mcpPath === '/') return true;
+    return path === this.mcpPath || path.startsWith(`${this.mcpPath}/`);
   }
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<GateOutcome> {
@@ -109,33 +130,41 @@ export class IdentityGate {
       writeJson(res, 200, protectedResourceMetadata(config, this.scopesSupported));
       return { kind: 'handled' };
     }
-    if (!(path === this.mcpPath || path.startsWith(`${this.mcpPath}/`))) return { kind: 'pass' };
+    if (!this.ownsPath(path)) return { kind: 'pass' };
 
     const bearer = extractBearer(req.headers.authorization);
     if (bearer === null) {
       this.challenge(res, 'missing_bearer');
       return { kind: 'handled' };
     }
-    let principal: Principal;
+    const fields = { method: req.method, path: path.slice(0, 200) };
     try {
-      principal = await this.verifier.verify(bearer);
-    } catch (err) {
-      if (!(err instanceof Deny)) throw err;
-      if (!err.ours && !isRequired(config) && this.legacyBearerOk !== null && (await this.legacyBearerOk(bearer))) {
-        return { kind: 'legacy', bearer };
+      let principal: Principal;
+      try {
+        principal = await this.verifier.verify(bearer);
+      } catch (err) {
+        if (!(err instanceof Deny)) throw err;
+        if (!err.ours && !isRequired(config) && this.legacyBearerOk !== null && (await this.legacyBearerOk(bearer))) {
+          return { kind: 'legacy', bearer };
+        }
+        this.denied += 1;
+        this.log('identity: bearer refused', { ...fields, reason: err.reason, ours: err.ours });
+        this.challenge(res, err.reason);
+        return { kind: 'handled' };
       }
-      this.denied += 1;
-      this.log('identity: bearer refused', { reason: err.reason, ours: err.ours, method: req.method, path });
-      this.challenge(res, err.reason);
+      if (this.mintInternalToken !== null) {
+        req.headers.authorization = `Bearer ${await this.mintInternalToken(principal)}`;
+      }
+      this.verified += 1;
+      this.principals.set(req, principal);
+      return { kind: 'principal', principal };
+    } catch (err) {
+      // The verifier, the legacy check or the minter threw: fail closed, never hang the request.
+      this.errors += 1;
+      this.log('identity: verifier error', { ...fields, error: (err as Error).name ?? 'Error' });
+      if (!res.headersSent) writeJson(res, 500, { error: 'server_error', error_description: 'identity check failed' });
       return { kind: 'handled' };
     }
-
-    this.verified += 1;
-    this.principals.set(req, principal);
-    if (this.mintInternalToken !== null) {
-      req.headers.authorization = `Bearer ${await this.mintInternalToken(principal)}`;
-    }
-    return { kind: 'principal', principal };
   }
 
   /** Compose: run `inner` for every request the gate does not answer itself. */

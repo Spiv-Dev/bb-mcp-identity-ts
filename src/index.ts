@@ -18,7 +18,7 @@ export { ALG, KeySet } from './jwks.js';
 export type { KeySetHealth, KeySetOptions } from './jwks.js';
 export { scopesOf, SnapshotStore } from './snapshot.js';
 export type { SnapshotDocument, SnapshotHealth, SnapshotStoreOptions, SubjectEntry } from './snapshot.js';
-export { parseLines, ServicePrincipals, todayUtc } from './service_principals.js';
+export { isCalendarDate, parseLines, ServicePrincipals, todayUtc } from './service_principals.js';
 export type { ServicePrincipal } from './service_principals.js';
 export { Deny, scopeString, Verifier } from './verifier.js';
 export type { Principal, PrincipalKind, VerifierHealth, VerifierOptions } from './verifier.js';

@@ -3,6 +3,7 @@
  * snapshot endpoint with verifier-token auth and ETag, and a minter for test
  * tokens. Everything here is synthetic and lives only for one test run.
  */
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { exportJWK, generateKeyPair, SignJWT, type JWK, type KeyLike } from 'jose';
 
@@ -21,7 +22,8 @@ export interface MutableSnapshot extends SnapshotDocument {
   subjects: Record<string, { status: string; active: boolean; not_before: number; tier: string | null; scope: string | null }>;
 }
 
-const HS_KEY = new TextEncoder().encode('synthetic-hs256-test-key-32-bytes-long!!');
+/** A throwaway symmetric key, new on every run, used only to mint tokens the verifier must refuse (wrong_alg). */
+const HS_KEY = new Uint8Array(randomBytes(32));
 
 export class StubBroker {
   readonly kid = 'bbid-test-1';
@@ -66,7 +68,7 @@ export class StubBroker {
     if (s) await new Promise<void>((resolve) => s.close(() => resolve()));
   }
 
-  /** Bump the version and the generation time so a poller sees a change. */
+  /** Apply a change and bump the version so a poller sees it (generated_at is left to the test). */
   publish(mutate: (snap: MutableSnapshot) => void): void {
     mutate(this.snapshot);
     this.snapshot.version += 1;
