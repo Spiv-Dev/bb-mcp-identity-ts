@@ -1,7 +1,8 @@
 /**
  * The broker's entitlement snapshot for this app: polled, cached on disk,
  * and consulted on every request. See docs/VERIFIER_PROTOCOL.md section 4
- * in the bb-identity repo for the contract.
+ * in the bb-identity repo for the contract. `generated_at` is unix
+ * milliseconds, as the broker emits it.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -58,6 +59,26 @@ function isDocumentFor(app: string, body: unknown): body is SnapshotDocument {
   return b.app === app && typeof b.subjects === 'object' && b.subjects !== null && !Array.isArray(b.subjects);
 }
 
+/** A subject entry exactly as the broker shapes it; anything else is treated as absent (and so denied). */
+function parseEntry(raw: unknown): SubjectEntry | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r['active'] !== 'boolean') return null;
+  const nb = r['not_before'] ?? 0;
+  if (typeof nb !== 'number' || !Number.isFinite(nb)) return null;
+  const tier = r['tier'] ?? null;
+  if (tier !== null && typeof tier !== 'string') return null;
+  const scope = r['scope'] ?? null;
+  if (scope !== null && typeof scope !== 'string') return null;
+  return {
+    status: typeof r['status'] === 'string' ? r['status'] : 'unknown',
+    active: r['active'],
+    not_before: Math.trunc(nb),
+    tier: tier || null,
+    scope,
+  };
+}
+
 export class SnapshotStore {
   private readonly url: string;
   private readonly token: string | null;
@@ -66,11 +87,12 @@ export class SnapshotStore {
   private readonly intervalMs: number;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
-  private readonly warn: (message: string) => void;
+  private readonly warnImpl: (message: string) => void;
   private snapshot: SnapshotDocument | null = null;
   private etag: string | null = null;
   private lastError: string | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private startPromise: Promise<boolean> | null = null;
   private inflight: Promise<boolean> | null = null;
 
   constructor(options: SnapshotStoreOptions) {
@@ -81,13 +103,21 @@ export class SnapshotStore {
     this.intervalMs = options.pollIntervalS * 1000;
     this.timeoutMs = options.timeoutMs;
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.warn = options.warn ?? (() => undefined);
+    this.warnImpl = options.warn ?? (() => undefined);
     if (this.cachePath && existsSync(this.cachePath)) {
       try {
         this.accept(JSON.parse(readFileSync(this.cachePath, 'utf8')) as unknown, null, false);
       } catch (err) {
         this.warn(`identity snapshot cache unreadable: ${(err as Error).message}`);
       }
+    }
+  }
+
+  private warn(message: string): void {
+    try {
+      this.warnImpl(message);
+    } catch {
+      // a logging failure never becomes an unhandled rejection
     }
   }
 
@@ -138,16 +168,8 @@ export class SnapshotStore {
 
   entry(sub: string): SubjectEntry | null {
     if (this.snapshot === null) return null;
-    const raw = Object.prototype.hasOwnProperty.call(this.snapshot.subjects, sub) ? this.snapshot.subjects[sub] : undefined;
-    if (typeof raw !== 'object' || raw === null) return null;
-    const r = raw as Partial<SubjectEntry>;
-    return {
-      status: typeof r.status === 'string' ? r.status : 'unknown',
-      active: r.active === true,
-      not_before: Math.trunc(Number(r.not_before) || 0),
-      tier: typeof r.tier === 'string' && r.tier ? r.tier : null,
-      scope: typeof r.scope === 'string' ? r.scope : null,
-    };
+    if (!Object.prototype.hasOwnProperty.call(this.snapshot.subjects, sub)) return null;
+    return parseEntry(this.snapshot.subjects[sub]);
   }
 
   // ── fetching ────────────────────────────────────────────────────────
@@ -184,15 +206,25 @@ export class SnapshotStore {
     }
   }
 
-  /** Poll once now (awaitable), then keep polling in the background. */
-  async start(): Promise<boolean> {
-    if (this.timer) return this.snapshot !== null;
-    const first = await this.fetch();
-    this.timer = setInterval(() => {
-      void this.fetch();
-    }, this.intervalMs);
-    this.timer.unref();
-    return first;
+  /** Poll once now (awaitable), then keep polling in the background. Concurrent callers share the first poll. */
+  start(): Promise<boolean> {
+    if (this.timer) return Promise.resolve(this.snapshot !== null);
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = (async () => {
+      try {
+        const first = await this.fetch();
+        if (!this.timer) {
+          this.timer = setInterval(() => {
+            void this.fetch();
+          }, this.intervalMs);
+          this.timer.unref();
+        }
+        return first;
+      } finally {
+        this.startPromise = null;
+      }
+    })();
+    return this.startPromise;
   }
 
   stop(): void {

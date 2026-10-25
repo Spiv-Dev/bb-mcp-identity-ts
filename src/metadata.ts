@@ -32,8 +32,14 @@ export function resourceMetadataUrl(config: IdentityConfig): string {
   return `${base}/.well-known/oauth-protected-resource`;
 }
 
+/** A value safe inside a quoted-string header parameter: no quotes, backslashes or control characters. */
+function quotable(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/["\\\x00-\x1f\x7f]/g, '');
+}
+
 export function wwwAuthenticate(config: IdentityConfig, options: { error?: string | null } = {}): string {
-  const parts = [`Bearer realm="${config.realm}"`, `resource_metadata="${resourceMetadataUrl(config)}"`];
-  if (options.error) parts.push(`error="${options.error}"`);
+  const parts = [`Bearer realm="${quotable(config.realm)}"`, `resource_metadata="${quotable(resourceMetadataUrl(config))}"`];
+  if (options.error) parts.push(`error="${quotable(options.error)}"`);
   return parts.join(', ');
 }

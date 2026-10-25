@@ -6,7 +6,8 @@
  *   svc-<name>:<tier>:<owner 18-char Salesforce id>:<expires YYYY-MM-DD>:<token>
  *
  * A service principal is honoured only while its owner is present and active
- * in the broker snapshot and its expiry is in the future.
+ * in the broker snapshot and its expiry date has not passed (the expiry day
+ * itself, in UTC, is still valid). Names and tokens are unique per file.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
@@ -22,7 +23,16 @@ export interface ServicePrincipal {
   token: string;
 }
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** True for a real calendar date (V8's Date.parse would accept 2099-02-31). */
+export function isCalendarDate(s: string): boolean {
+  const m = DATE_RE.exec(s);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
 
 function splitFields(line: string, count: number): string[] {
   // Like Python's str.split(':', count - 1): the last field keeps any further colons.
@@ -40,6 +50,8 @@ function splitFields(line: string, count: number): string[] {
 
 export function parseLines(text: string): ServicePrincipal[] {
   const out: ServicePrincipal[] = [];
+  const names = new Set<string>();
+  const tokens = new Set<string>();
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
@@ -49,9 +61,11 @@ export function parseLines(text: string): ServicePrincipal[] {
     if (!name.startsWith('svc-') || !tier || owner.length !== 18 || token.length < 32) {
       throw new Error(`malformed service principal line for ${JSON.stringify(name)}`);
     }
-    if (!DATE_RE.test(expires) || Number.isNaN(Date.parse(`${expires}T00:00:00Z`))) {
-      throw new Error(`service principal ${JSON.stringify(name)} has an invalid expiry date`);
-    }
+    if (!isCalendarDate(expires)) throw new Error(`service principal ${JSON.stringify(name)} has an invalid expiry date`);
+    if (names.has(name)) throw new Error(`duplicate service principal name ${JSON.stringify(name)}`);
+    if (tokens.has(token)) throw new Error(`service principal ${JSON.stringify(name)} reuses another principal's token`);
+    names.add(name);
+    tokens.add(token);
     out.push({ name, tier, ownerSub: owner, expires, token });
   }
   return out;
@@ -72,6 +86,7 @@ export class ServicePrincipals {
     this.principals = principals;
   }
 
+  /** Reads the file; a missing path yields no principals (the caller decides whether to warn). */
   static fromFile(path: string | null): ServicePrincipals {
     if (!path || !existsSync(path)) return new ServicePrincipals([]);
     return new ServicePrincipals(parseLines(readFileSync(path, 'utf8')));

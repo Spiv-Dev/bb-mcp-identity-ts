@@ -160,7 +160,9 @@ describe('Verifier', () => {
         { ...broker.publicJwk, alg: 'ES384' },
       ],
     };
-    const v = new Verifier(makeConfig(broker, 'required', { T_IDENTITY_PINNED_JWKS: JSON.stringify(pinned), T_IDENTITY_JWKS_URL: '' }));
+    const v = new Verifier(
+      makeConfig(broker, 'required', { T_IDENTITY_PINNED_JWKS: JSON.stringify(pinned), T_IDENTITY_JWKS_URL: 'http://127.0.0.1:9/nope' }),
+    );
     await v.snapshot.fetch();
     expect(v.health().keys.kids).toEqual([]);
     expect((await denial(v, await broker.mint())).reason).toBe('unknown_kid');

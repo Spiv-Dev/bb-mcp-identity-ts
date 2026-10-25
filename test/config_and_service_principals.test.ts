@@ -13,6 +13,7 @@ describe('configFromEnv', () => {
         DEV_IDENTITY_MODE: 'enabled',
         DEV_IDENTITY_ISSUER: 'https://id.example.test/r/development/',
         DEV_IDENTITY_RESOURCE: 'https://dev.example.test/mcp/',
+        DEV_IDENTITY_VERIFIER_TOKEN: 'bbv_x',
       },
     });
     expect(c.mode).toBe('enabled');
@@ -21,7 +22,7 @@ describe('configFromEnv', () => {
     expect(c.app).toBe('development');
     expect(c.jwksUrl).toBe('https://id.example.test/.well-known/jwks.json');
     expect(c.snapshotUrl).toBe('https://id.example.test/r/development/snapshot');
-    expect(c.verifierToken).toBeNull();
+    expect(c.verifierToken).toBe('bbv_x');
     expect(c.pinnedJwks).toBeNull();
     expect(c.pollIntervalS).toBe(60);
     expect(c.jwksTtlS).toBe(300);
@@ -37,6 +38,7 @@ describe('configFromEnv', () => {
         DEV_IDENTITY_MODE: 'required',
         DEV_IDENTITY_ISSUER: 'https://id.example.test/r/development',
         DEV_IDENTITY_RESOURCE: 'https://dev.example.test/',
+        DEV_IDENTITY_VERIFIER_TOKEN: 'bbv_x',
         DEV_IDENTITY_JWKS_URL: 'http://127.0.0.1:8775/.well-known/jwks.json',
         DEV_IDENTITY_SNAPSHOT_URL: 'http://127.0.0.1:8775/r/development/snapshot',
         DEV_IDENTITY_HTTP_TIMEOUT_S: '2.5',

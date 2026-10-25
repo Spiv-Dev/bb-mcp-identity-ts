@@ -67,13 +67,18 @@ do not want to switch on the outcome.
 | `SF_IDENTITY_MODE` | `off` (default), `enabled` (broker tokens plus legacy), `required` (broker tokens and service principals only) |
 | `SF_IDENTITY_ISSUER` | `https://id.bakerbaynes.com/r/salesforce` |
 | `SF_IDENTITY_RESOURCE` | this server's MCP URL, the token audience |
-| `SF_IDENTITY_VERIFIER_TOKEN` | from `npm run verifier-token -- salesforce` on the broker |
+| `SF_IDENTITY_VERIFIER_TOKEN` | from `npm run verifier-token -- salesforce` on the broker; required unless the mode is `off` |
 | `SF_IDENTITY_SNAPSHOT_URL` | default `<issuer>/snapshot`; on the broker's VM use `http://127.0.0.1:8775/r/salesforce/snapshot` |
 | `SF_IDENTITY_JWKS_URL` | default `<broker>/.well-known/jwks.json`; loopback on the broker's VM |
 | `SF_IDENTITY_SNAPSHOT_CACHE` | file path; restored on boot so a restart never starts blind |
 | `SF_IDENTITY_PINNED_JWKS` | optional JWKS JSON for offline verification |
 | `SF_IDENTITY_SERVICE_PRINCIPALS` | optional file of `svc-<name>:<tier>:<owner sub>:<expires>:<token>` lines |
 | `SF_IDENTITY_POLL_INTERVAL_S`, `_JWKS_TTL_S`, `_LEEWAY_S`, `_HTTP_TIMEOUT_S` | 60, 300, 30, 5 |
+
+An empty value counts as unset. The issuer, JWKS and snapshot URLs must be
+https; plain http is accepted for loopback hosts only (the broker on the same
+VM). A bad setting throws `ConfigError` at startup rather than denying every
+request at runtime.
 
 ## Deny rules (all 401)
 
@@ -88,8 +93,9 @@ the client.
 
 `verifier.health()` returns the identity mode, issuer, resource, the pinned or
 fetched `kid`s, and the snapshot version, age and freshness for the server's
-health endpoint. `gate.verified` and `gate.denied` are plain counters for
-metrics.
+health endpoint. `gate.verified`, `gate.denied` and `gate.errors` are plain counters for
+metrics. If the verifier or one of the callbacks throws, the gate answers 500
+and logs the error's name: it fails closed and never hangs a request.
 
 ## Develop
 

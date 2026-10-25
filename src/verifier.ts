@@ -100,6 +100,9 @@ export class Verifier {
       warn: options.warn,
     });
     this.servicePrincipals = ServicePrincipals.fromFile(config.servicePrincipalsPath);
+    if (config.servicePrincipalsPath && this.servicePrincipals.size === 0) {
+      (options.warn ?? (() => undefined))('identity: service principals file is missing or empty');
+    }
   }
 
   /** Fetch keys and the snapshot once, then keep polling in the background. */
