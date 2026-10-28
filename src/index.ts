@@ -14,7 +14,16 @@
  */
 export { ConfigError, configFromEnv, isEnabled, isRequired, issuerParts } from './config.js';
 export type { FromEnvOptions, IdentityConfig, Mode, PinnedJwks } from './config.js';
-export { BREAK_GLASS_MAX_WINDOW_S, BREAK_GLASS_PREFIX, BreakGlass, isArmed, mintBreakGlass } from './break_glass.js';
+export {
+  BREAK_GLASS_MAX_WINDOW_S,
+  BREAK_GLASS_PREFIX,
+  BreakGlass,
+  isArmed,
+  mintBreakGlass,
+  OWNER_PATTERN,
+  parseUntil,
+  UNTIL_PATTERN,
+} from './break_glass.js';
 export type { BreakGlassConfig, BreakGlassEvent, BreakGlassHealth, BreakGlassHook } from './break_glass.js';
 export { ALG, KeySet } from './jwks.js';
 export type { KeySetHealth, KeySetOptions } from './jwks.js';

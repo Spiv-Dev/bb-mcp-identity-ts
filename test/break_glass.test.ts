@@ -78,6 +78,8 @@ describe('break-glass settings', () => {
     [armedEnv(25 * 3600), /at most 24 hours/],
     [armedEnv(3600, { T_IDENTITY_BREAK_GLASS_TIER: '' }), /TIER is required/],
     [armedEnv(3600, { T_IDENTITY_BREAK_GLASS_OWNER: 'short' }), /18-char/],
+    [armedEnv(3600, { T_IDENTITY_BREAK_GLASS_OWNER: '../../../etc/passw' }), /18-char/],
+    [armedEnv(3600, { T_IDENTITY_BREAK_GLASS_OWNER: '0050000000000ééAAA' }), /18-char/],
   ])('fails loudly on a bad setting (%#)', (extra, message) => {
     expect(() => configFromEnv('T', { env: { ...baseEnv(), ...extra } })).toThrow(ConfigError);
     expect(() => configFromEnv('T', { env: { ...baseEnv(), ...extra } })).toThrow(message);
@@ -116,9 +118,15 @@ describe('break-glass verification', () => {
     expect(d.reason).toBe('identity_off');
   });
 
-  it('counts every use and throttles alerts to one a minute', async () => {
+  it('logs and counts every use and throttles alerts to one a minute', async () => {
     const events: BreakGlassEvent[] = [];
-    const v = verifierFor({ ...baseEnv(), ...armedEnv() }, (e) => events.push(e));
+    const lines: string[] = [];
+    const v = new Verifier(configFromEnv('T', { env: { ...baseEnv(), ...armedEnv() } }), {
+      warn: (m) => lines.push(m),
+      onBreakGlass: (e) => {
+        events.push(e);
+      },
+    });
     const now = Date.now() / 1000;
     await v.verify(BEARER, now);
     await v.verify(BEARER, now + 10);
@@ -126,6 +134,7 @@ describe('break-glass verification', () => {
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ event: 'identity.break_glass_used', owner_sub: OWNER, tier: 'Admin', uses: 1 });
     expect(events[1]?.uses).toBe(3);
+    expect(lines.filter((l) => l.includes('BREAK-GLASS bearer used'))).toHaveLength(3);
     const h = v.health().break_glass;
     expect(h).toMatchObject({ configured: true, armed: true, uses: 3 });
     expect(h.last_used).not.toBeNull();
@@ -179,3 +188,72 @@ describe('break-glass through the gate', () => {
     expect((await call('bbg_testapp_wrong')).status).toBe(401);
   });
 });
+
+describe('break-glass: one strict UNTIL format, the same as the Python verifier', () => {
+  const now = Date.UTC(2026, 9, 28, 12, 0) / 1000;
+  const env = (until: string): Record<string, string> => ({ ...baseEnv(), ...armedEnv(), T_IDENTITY_BREAK_GLASS_UNTIL: until });
+
+  it.each([
+    '2026-11-31T06:00:00Z', // no 31 November (Date.parse would roll it to 1 December)
+    '2026-02-30T00:00:00Z',
+    '2026-10-28T24:00:00Z',
+    '2026-10-28t18:00:00z', // lowercase separators
+    '2026-10-28 18:00:00+02:00', // space separator
+    '20261028T180000+0200', // basic format
+    '2026-10-28T18:00:00+0200',
+    '2026-10-28T18:00:00+02',
+    '2026-10-28T18Z',
+    '2026-10-28T18:00:00.000001Z', // more than millisecond precision
+    '2026-10-28T18:00:00+24:00',
+  ])('rejects %s', (until) => {
+    expect(() => configFromEnv('T', { env: env(until), nowS: now })).toThrow(ConfigError);
+  });
+
+  it.each([
+    ['2026-10-28T18:00Z', Date.UTC(2026, 9, 28, 18, 0) / 1000],
+    ['2026-10-28T18:00:00Z', Date.UTC(2026, 9, 28, 18, 0) / 1000],
+    ['2026-10-28T20:00:00.123+02:00', Date.UTC(2026, 9, 28, 18, 0, 0, 123) / 1000],
+    ['2026-10-28T09:00:00-04:00', Date.UTC(2026, 9, 28, 13, 0) / 1000],
+  ])('accepts %s', (until, expected) => {
+    const cfg = configFromEnv('T', { env: env(until), nowS: now }).breakGlass;
+    expect(cfg?.until).toBeCloseTo(expected, 6);
+    expect(cfg && isArmed(cfg, now)).toBe(true);
+  });
+});
+
+describe('break-glass: async alert hooks', () => {
+  it('a rejecting async hook is logged and never becomes an unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const lines: string[] = [];
+      const v = new Verifier(configFromEnv('T', { env: { ...baseEnv(), ...armedEnv() } }), {
+        warn: (m) => lines.push(m),
+        onBreakGlass: async () => {
+          throw new Error('n8n down');
+        },
+      });
+      expect((await v.verify(BEARER)).kind).toBe('break_glass');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toEqual([]);
+      expect(lines.some((l) => l.includes('alert hook failed: n8n down'))).toBe(true);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('an async hook is delivered', async () => {
+    const sent: BreakGlassEvent[] = [];
+    const v = verifierFor({ ...baseEnv(), ...armedEnv() }, async (e) => {
+      await Promise.resolve();
+      sent.push(e);
+    });
+    await v.verify(BEARER);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sent).toHaveLength(1);
+  });
+});
+

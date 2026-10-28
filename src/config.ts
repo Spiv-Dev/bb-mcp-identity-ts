@@ -21,7 +21,7 @@
  * loopback (the broker on the same VM) which may be plain http.
  */
 
-import { BREAK_GLASS_MAX_WINDOW_S, type BreakGlassConfig } from './break_glass.js';
+import { BREAK_GLASS_MAX_WINDOW_S, OWNER_PATTERN, parseUntil, type BreakGlassConfig } from './break_glass.js';
 
 export type Mode = 'off' | 'enabled' | 'required';
 
@@ -185,7 +185,6 @@ export function configFromEnv(prefix: string, options: FromEnvOptions = {}): Ide
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
-const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i;
 
 /**
  * Parse the break-glass settings. Unset = no break-glass. A malformed or
@@ -202,19 +201,17 @@ function breakGlassFromEnv(env: Env, p: string, nowS: number): BreakGlassConfig 
   }
   if (!HEX64.test(sha)) throw new ConfigError(`${p}BREAK_GLASS_SHA256 must be 64 hex characters (the SHA-256 of the bearer)`);
   if (!untilRaw) return { sha256: sha, until: null, tier, ownerSub };
-  if (!ISO_WITH_OFFSET.test(untilRaw)) {
+  const until = parseUntil(untilRaw);
+  if (until === null) {
     throw new ConfigError(
-      `${p}BREAK_GLASS_UNTIL must be an ISO-8601 datetime with a timezone offset, e.g. +02:00: ${JSON.stringify(untilRaw)}`,
+      `${p}BREAK_GLASS_UNTIL must be a real YYYY-MM-DDTHH:MM[:SS[.fff]] with Z or a timezone offset like +02:00: ${JSON.stringify(untilRaw)}`,
     );
   }
-  const ms = Date.parse(untilRaw);
-  if (Number.isNaN(ms)) throw new ConfigError(`${p}BREAK_GLASS_UNTIL is not a valid datetime: ${JSON.stringify(untilRaw)}`);
-  const until = ms / 1000;
   if (until > nowS + BREAK_GLASS_MAX_WINDOW_S) {
     throw new ConfigError(`${p}BREAK_GLASS_UNTIL may be at most 24 hours ahead (got ${JSON.stringify(untilRaw)})`);
   }
   if (!tier) throw new ConfigError(`${p}BREAK_GLASS_TIER is required while ${p}BREAK_GLASS_UNTIL is set`);
-  if (!ownerSub || ownerSub.length !== 18) {
+  if (!ownerSub || !OWNER_PATTERN.test(ownerSub)) {
     throw new ConfigError(`${p}BREAK_GLASS_OWNER must be the operator's 18-char Salesforce Id while ${p}BREAK_GLASS_UNTIL is set`);
   }
   return { sha256: sha, until, tier, ownerSub };

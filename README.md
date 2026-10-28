@@ -74,7 +74,7 @@ do not want to switch on the outcome.
 | `SF_IDENTITY_PINNED_JWKS` | optional JWKS JSON for offline verification |
 | `SF_IDENTITY_SERVICE_PRINCIPALS` | optional file of `svc-<name>:<tier>:<owner sub>:<expires>:<token>` lines |
 | `SF_IDENTITY_BREAK_GLASS_SHA256` | optional: SHA-256 hex of the sealed operator bearer (see Break-glass) |
-| `SF_IDENTITY_BREAK_GLASS_UNTIL` | arms break-glass until this ISO datetime with offset; at most 24 hours ahead at startup |
+| `SF_IDENTITY_BREAK_GLASS_UNTIL` | arms break-glass until `YYYY-MM-DDTHH:MM[:SS[.fff]]` plus `Z` or `+HH:MM`; at most 24 hours ahead at startup |
 | `SF_IDENTITY_BREAK_GLASS_TIER` / `_OWNER` | the tier it grants and the operator's 18-char Salesforce Id; required while armed |
 | `SF_IDENTITY_POLL_INTERVAL_S`, `_JWKS_TTL_S`, `_LEEWAY_S`, `_HTTP_TIMEOUT_S` | 60, 300, 30, 5 |
 
@@ -108,7 +108,8 @@ the mode to `off`.
 3. Connect with the bearer. It needs neither the broker nor the snapshot. The
    principal acts as the owner at the configured tier, with
    `kind: 'break_glass'`. Every accepted use is logged and passed to
-   `new Verifier(config, { onBreakGlass })` (at most once a minute);
+   `new Verifier(config, { onBreakGlass })`, sync or async, at most once a
+   minute; a failing hook is logged and never crashes the process.
    `health().break_glass` counts every use. Without a `warn` sink these lines
    go to the console: break-glass is never silent.
 4. Afterwards clear `_UNTIL`, restart, and mint a new bearer: a used bearer is
