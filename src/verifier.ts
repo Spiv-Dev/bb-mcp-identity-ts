@@ -5,12 +5,13 @@
  */
 import { decodeProtectedHeader, errors as joseErrors, jwtVerify, type JWTPayload } from 'jose';
 
+import { BreakGlass, type BreakGlassHealth, type BreakGlassHook } from './break_glass.js';
 import { isEnabled, type IdentityConfig } from './config.js';
 import { ALG, KeySet } from './jwks.js';
 import { ServicePrincipals, type ServicePrincipal } from './service_principals.js';
 import { scopesOf, SnapshotStore } from './snapshot.js';
 
-export type PrincipalKind = 'user' | 'service';
+export type PrincipalKind = 'user' | 'service' | 'break_glass';
 
 /** A verified caller. `sub` is the 18-char Salesforce User Id. */
 export interface Principal {
@@ -50,6 +51,8 @@ export class Deny extends Error {
 export interface VerifierOptions {
   fetchImpl?: typeof fetch;
   warn?: (message: string) => void;
+  /** Called whenever the break-glass bearer is accepted (at most once a minute): wire it to alerting. */
+  onBreakGlass?: BreakGlassHook;
 }
 
 export interface VerifierHealth {
@@ -59,6 +62,7 @@ export interface VerifierHealth {
   keys: ReturnType<KeySet['health']>;
   snapshot: ReturnType<SnapshotStore['health']>;
   service_principals: number;
+  break_glass: BreakGlassHealth;
 }
 
 const REQUIRED_CLAIMS = ['exp', 'iat', 'sub', 'iss', 'aud'];
@@ -79,6 +83,7 @@ export class Verifier {
   readonly keys: KeySet;
   readonly snapshot: SnapshotStore;
   readonly servicePrincipals: ServicePrincipals;
+  readonly breakGlass: BreakGlass;
 
   constructor(config: IdentityConfig, options: VerifierOptions = {}) {
     this.config = config;
@@ -100,6 +105,13 @@ export class Verifier {
       warn: options.warn,
     });
     this.servicePrincipals = ServicePrincipals.fromFile(config.servicePrincipalsPath);
+    // Break-glass is never silent: without a `warn` sink it logs to the console.
+    const out = options.warn;
+    this.breakGlass = new BreakGlass(config.breakGlass, config.app, options.onBreakGlass, {
+      info: out ?? ((m) => console.info(m)),
+      warn: out ?? ((m) => console.warn(m)),
+      error: out ?? ((m) => console.error(m)),
+    });
     if (config.servicePrincipalsPath && this.servicePrincipals.size === 0) {
       (options.warn ?? (() => undefined))('identity: service principals file is missing or empty');
     }
@@ -108,6 +120,7 @@ export class Verifier {
   /** Fetch keys and the snapshot once, then keep polling in the background. */
   async start(): Promise<void> {
     if (!isEnabled(this.config)) return;
+    this.breakGlass.announce();
     await this.keys.fetch();
     await this.snapshot.start();
   }
@@ -122,6 +135,14 @@ export class Verifier {
   async verify(bearer: string, nowS?: number): Promise<Principal> {
     if (!isEnabled(this.config)) throw new Deny('identity_off', { ours: false });
     const now = nowS ?? Date.now() / 1000;
+
+    // Break-glass first: it must work with the broker and the snapshot down. A `bbg_`
+    // bearer is always ours, so a refusal never falls through to a legacy validator.
+    if (BreakGlass.isCandidate(bearer)) {
+      const outcome = this.breakGlass.check(bearer, now);
+      if (outcome !== 'ok') throw new Deny(outcome);
+      return this.breakGlassPrincipal();
+    }
 
     const svc = bearer.startsWith('bbs_') || this.servicePrincipals.size > 0 ? this.servicePrincipals.match(bearer) : null;
     if (svc !== null) return this.service(svc);
@@ -199,6 +220,24 @@ export class Verifier {
     };
   }
 
+  private breakGlassPrincipal(): Principal {
+    const bg = this.config.breakGlass;
+    // check() returned 'ok', so break-glass is configured and armed, with a tier and an owner.
+    if (bg === null || bg.tier === null || bg.ownerSub === null) throw new Deny('break_glass_not_configured');
+    return {
+      sub: bg.ownerSub,
+      username: 'break-glass',
+      app: this.config.app,
+      tier: bg.tier,
+      scopes: [],
+      clientId: 'break-glass',
+      authTime: 0,
+      jti: '',
+      exp: Math.trunc(bg.until ?? 0),
+      kind: 'break_glass',
+    };
+  }
+
   // ── health ──────────────────────────────────────────────────────────
 
   health(): VerifierHealth {
@@ -209,6 +248,7 @@ export class Verifier {
       keys: this.keys.health(),
       snapshot: this.snapshot.health(),
       service_principals: this.servicePrincipals.size,
+      break_glass: this.breakGlass.health(),
     };
   }
 }

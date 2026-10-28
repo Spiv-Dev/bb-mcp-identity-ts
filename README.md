@@ -73,6 +73,9 @@ do not want to switch on the outcome.
 | `SF_IDENTITY_SNAPSHOT_CACHE` | file path; restored on boot so a restart never starts blind |
 | `SF_IDENTITY_PINNED_JWKS` | optional JWKS JSON for offline verification |
 | `SF_IDENTITY_SERVICE_PRINCIPALS` | optional file of `svc-<name>:<tier>:<owner sub>:<expires>:<token>` lines |
+| `SF_IDENTITY_BREAK_GLASS_SHA256` | optional: SHA-256 hex of the sealed operator bearer (see Break-glass) |
+| `SF_IDENTITY_BREAK_GLASS_UNTIL` | arms break-glass until `YYYY-MM-DDTHH:MM[:SS[.fff]]` plus `Z` or `+HH:MM`; at most 24 hours ahead at startup |
+| `SF_IDENTITY_BREAK_GLASS_TIER` / `_OWNER` | the tier it grants and the operator's 18-char Salesforce Id; required while armed |
 | `SF_IDENTITY_POLL_INTERVAL_S`, `_JWKS_TTL_S`, `_LEEWAY_S`, `_HTTP_TIMEOUT_S` | 60, 300, 30, 5 |
 
 An empty value counts as unset. The issuer, JWKS and snapshot URLs must be
@@ -84,16 +87,43 @@ request at runtime.
 
 No bearer; not an ES256 token with a known `kid`; wrong `iss` or `aud`;
 expired; no snapshot or a stale one; subject unknown, inactive or frozen; no
-tier for this app; `auth_time` at or before the subject's `not_before`. In
+tier for this app; `auth_time` at or before the subject's `not_before`; a
+`bbg_` bearer that is not configured, not armed or does not match. In
 `enabled` mode a bearer that is not a broker token at all is handed to
 `legacyBearerOk`. The refusal reason is logged through `log`, never sent to
 the client.
 
+## Break-glass
+
+One sealed, time-boxed, alerting operator bearer per server, identical to the
+Python library. It is how you get in when the broker or Salesforce is down or
+an entitlement mistake locks you out, so a lockout is never fixed by setting
+the mode to `off`.
+
+1. Mint it once per server and keep the bearer offline. Only the hash goes on
+   the server: `node -e "import('bb-mcp-identity').then(m => console.log(m.mintBreakGlass('salesforce')))"`,
+   then set `SF_IDENTITY_BREAK_GLASS_SHA256`, `_TIER` and `_OWNER`.
+2. In an emergency, set `SF_IDENTITY_BREAK_GLASS_UNTIL` (for example two hours
+   ahead, `+02:00`) and restart. `start()` logs `break-glass ARMED`.
+3. Connect with the bearer. It needs neither the broker nor the snapshot. The
+   principal acts as the owner at the configured tier, with
+   `kind: 'break_glass'`. Every accepted use is logged and passed to
+   `new Verifier(config, { onBreakGlass })`, sync or async, at most once a
+   minute; a failing hook is logged and never crashes the process.
+   `health().break_glass` counts every use. Without a `warn` sink these lines
+   go to the console: break-glass is never silent.
+4. Afterwards clear `_UNTIL`, restart, and mint a new bearer: a used bearer is
+   treated as spent.
+
+A `bbg_` bearer is always handled by the verifier: when it is wrong, unarmed or
+not configured, the request is refused in both modes and never reaches
+`legacyBearerOk`.
+
 ## Health
 
 `verifier.health()` returns the identity mode, issuer, resource, the pinned or
-fetched `kid`s, and the snapshot version, age and freshness for the server's
-health endpoint. `gate.verified`, `gate.denied` and `gate.errors` are plain counters for
+fetched `kid`s, the snapshot version, age and freshness, and the break-glass
+state (configured, armed, until, uses) for the server's health endpoint. `gate.verified`, `gate.denied` and `gate.errors` are plain counters for
 metrics. If the verifier or one of the callbacks throws, the gate answers 500
 and logs the error's name: it fails closed and never hangs a request.
 
