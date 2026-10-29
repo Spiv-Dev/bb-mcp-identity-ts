@@ -38,4 +38,4 @@ export type { ProtectedResourceMetadata } from './metadata.js';
 export { extractBearer, IdentityGate, pathOnly, PRM_PATH } from './http.js';
 export type { GateOptions, GateOutcome, LegacyCheck, Minter } from './http.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
