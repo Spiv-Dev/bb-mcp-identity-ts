@@ -77,6 +77,7 @@ do not want to switch on the outcome.
 | `SF_IDENTITY_BREAK_GLASS_UNTIL` | arms break-glass until `YYYY-MM-DDTHH:MM[:SS[.fff]]` plus `Z` or `+HH:MM`; at most 24 hours ahead at startup |
 | `SF_IDENTITY_BREAK_GLASS_TIER` / `_OWNER` | the tier it grants and the operator's 18-char Salesforce Id; required while armed |
 | `SF_IDENTITY_POLL_INTERVAL_S`, `_JWKS_TTL_S`, `_LEEWAY_S`, `_HTTP_TIMEOUT_S` | 60, 300, 30, 5 |
+| `SF_IDENTITY_MISS_REFRESH_S` | default `5`: when a validly signed token's user is missing from the snapshot or has no tier there (a first sign-in beats the 60 s poll), fetch the snapshot once, at most every this many seconds; `0` turns it off |
 
 An empty value counts as unset. The issuer, JWKS and snapshot URLs must be
 https; plain http is accepted for loopback hosts only (the broker on the same

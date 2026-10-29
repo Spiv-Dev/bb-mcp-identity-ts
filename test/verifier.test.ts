@@ -219,4 +219,65 @@ describe('Verifier', () => {
     expect(h.keys.kids).toEqual(['bbid-test-1']);
     expect(h.keys.last_error).toBeNull();
   });
+
+  describe('refresh on miss', () => {
+    const NEW_SUB = '005000000000003AAA';
+    const addNew = () =>
+      broker.publish((s) => {
+        s.subjects[NEW_SUB] = { ...s.subjects[SUB]! };
+      });
+
+    it('refetches the snapshot once for a first sign-in', async () => {
+      const v = await started();
+      addNew();
+      const hits = broker.snapshotHits;
+      expect((await v.verify(await broker.mint({ sub: NEW_SUB }))).sub).toBe(NEW_SUB);
+      expect(broker.snapshotHits).toBe(hits + 1);
+    });
+
+    it('refetches for a new entitlement', async () => {
+      const v = await started();
+      broker.publish((s) => Object.assign(s.subjects[SUB]!, { tier: null, scope: null }));
+      await v.snapshot.fetch();
+      broker.publish((s) => Object.assign(s.subjects[SUB]!, { tier: 'Read', scope: 't:read' }));
+      expect((await v.verify(await broker.mint())).tier).toBe('Read');
+    });
+
+    it('is rate-limited', async () => {
+      const v = await started();
+      const hits = broker.snapshotHits;
+      const now = Date.now() / 1000;
+      for (let i = 0; i < 3; i++) {
+        await expect(v.verify(await broker.mint({ sub: NEW_SUB }), now)).rejects.toMatchObject({ reason: 'unknown_subject' });
+      }
+      expect(broker.snapshotHits).toBe(hits + 1);
+      await expect(v.verify(await broker.mint({ sub: NEW_SUB }), now + 6)).rejects.toBeInstanceOf(Deny);
+      expect(broker.snapshotHits).toBe(hits + 2);
+    });
+
+    it('shares one fetch between concurrent misses', async () => {
+      const v = await started();
+      addNew();
+      const hits = broker.snapshotHits;
+      const tok = await broker.mint({ sub: NEW_SUB });
+      const out = await Promise.all([v.verify(tok), v.verify(tok), v.verify(tok)]);
+      expect(out.map((p) => p.sub)).toEqual([NEW_SUB, NEW_SUB, NEW_SUB]);
+      expect(broker.snapshotHits).toBe(hits + 1);
+    });
+
+    it('can be disabled', async () => {
+      const v = await started('required', { T_IDENTITY_MISS_REFRESH_S: '0' });
+      addNew();
+      const hits = broker.snapshotHits;
+      expect((await denial(v, await broker.mint({ sub: NEW_SUB }))).reason).toBe('unknown_subject');
+      expect(broker.snapshotHits).toBe(hits);
+    });
+
+    it('never fetches for a forged token', async () => {
+      const v = await started();
+      const hits = broker.snapshotHits;
+      await expect(v.verify(await broker.mint({ sub: NEW_SUB, _kid: 'bbid-unknown' }))).rejects.toBeInstanceOf(Deny);
+      expect(broker.snapshotHits).toBe(hits);
+    });
+  });
 });
