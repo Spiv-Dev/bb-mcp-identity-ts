@@ -50,6 +50,8 @@ export interface IdentityConfig {
   /** The sealed operator bearer; null = no break-glass on this server. */
   readonly breakGlass: BreakGlassConfig | null;
   readonly pollIntervalS: number;
+  /** Refetch the snapshot when a signed token's user is missing (first sign-in), at most once per this many seconds; 0 = never. */
+  readonly missRefreshS: number;
   readonly jwksTtlS: number;
   readonly leewayS: number;
   readonly httpTimeoutMs: number;
@@ -177,6 +179,7 @@ export function configFromEnv(prefix: string, options: FromEnvOptions = {}): Ide
     pinnedJwks: pinned,
     breakGlass: breakGlassFromEnv(env, p, options.nowS ?? Date.now() / 1000),
     pollIntervalS: readInt(env, p + 'POLL_INTERVAL_S', 60, 1),
+    missRefreshS: readInt(env, p + 'MISS_REFRESH_S', 5, 0),
     jwksTtlS: readInt(env, p + 'JWKS_TTL_S', 300, 1),
     leewayS: readInt(env, p + 'LEEWAY_S', 30, 0),
     httpTimeoutMs: Math.round(readFloat(env, p + 'HTTP_TIMEOUT_S', 5) * 1000),

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- A first sign-in is no longer refused as `unknown_subject` for up to a minute: when a validly signed token's user is missing from the snapshot (or has no tier), the verifier refetches the snapshot once and re-checks, at most once per `<PFX>_IDENTITY_MISS_REFRESH_S` (default 5, `0` = off); concurrent misses share one fetch. Found in the A2 spike.
+
 - Initial verifier library for node:http MCP servers: `configFromEnv`
   (`<PFX>_IDENTITY_*`), `KeySet` (pinned or fetched ES256 JWKS, one refetch per
   unknown `kid`), `SnapshotStore` (ETag polling, disk cache, staleness),

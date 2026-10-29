@@ -117,6 +117,30 @@ export class Verifier {
     }
   }
 
+  private lastMissRefreshS = 0;
+  private missFetch: Promise<boolean> | null = null;
+
+  /**
+   * Fetch the snapshot now, at most once per `missRefreshS` (0 = never);
+   * concurrent misses share one fetch. Only reached after the signature checked
+   * out, so a forged token cannot drive fetches. Returns whether a fetch ran.
+   */
+  private async refreshOnMiss(now: number): Promise<boolean> {
+    const interval = this.config.missRefreshS;
+    if (interval <= 0) return false;
+    if (this.missFetch !== null) {
+      await this.missFetch;
+      return true;
+    }
+    if (now - this.lastMissRefreshS < interval) return false;
+    this.lastMissRefreshS = now;
+    this.missFetch = this.snapshot.fetch().finally(() => {
+      this.missFetch = null;
+    });
+    await this.missFetch;
+    return true;
+  }
+
   /** Fetch keys and the snapshot once, then keep polling in the background. */
   async start(): Promise<void> {
     if (!isEnabled(this.config)) return;
@@ -182,7 +206,11 @@ export class Verifier {
 
     // The snapshot decides. It is newer than the token.
     if (!this.snapshot.isFresh(now)) throw new Deny(this.snapshot.version !== null ? 'snapshot_stale' : 'no_snapshot');
-    const entry = this.snapshot.entry(sub);
+    let entry = this.snapshot.entry(sub);
+    // A validly signed token is never older than the snapshot that should know
+    // its subject: a first sign-in (or a new entitlement) can beat the next
+    // poll by up to a minute. Refetch once, rate-limited, and re-check.
+    if ((entry === null || !entry.tier) && (await this.refreshOnMiss(now))) entry = this.snapshot.entry(sub);
     if (entry === null) throw new Deny('unknown_subject');
     if (!entry.active) throw new Deny(`subject_${entry.status}`);
     // A revocation at second N ends every session signed in at or before N (the broker applies the same rule).
