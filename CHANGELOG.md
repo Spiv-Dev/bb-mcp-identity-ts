@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-06
+
+### Added
+- `UsageLedger`, `redactQuestion` and `userSlug` (`src/usage.ts`) for fleet tool-usage tracking: one JSON line per tool call in `<dir>/usage-YYYY-MM-DD.jsonl` (UTC day, mode 0600, pruned after 14 days), set by `<PREFIX>_USAGE_DIR` and off when it is unset. Events carry call metadata and argument names only, never argument values or results; a question is kept only after redaction (emails, phones, long numbers, Salesforce Ids, URLs, amounts). `record` never throws. The event schema and the redaction fixtures (`spec/`) are shared byte for byte with bb-mcp-identity-py 0.1.3. The module imports nothing from the auth code.
+
 ## [0.1.1] - 2026-10-29
 
 ### Fixed

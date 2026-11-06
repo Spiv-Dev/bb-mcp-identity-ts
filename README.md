@@ -128,6 +128,29 @@ state (configured, armed, until, uses) for the server's health endpoint. `gate.v
 metrics. If the verifier or one of the callbacks throws, the gate answers 500
 and logs the error's name: it fails closed and never hangs a request.
 
+## Usage ledger (fleet tool-usage tracking)
+
+`usage.ts` is separate from the auth code. Each server records one line per tool call; a
+shipper on the VM loads the files into the fleet usage store.
+
+```ts
+import { UsageLedger } from 'bb-mcp-identity';
+
+const usage = UsageLedger.fromEnv('SF', { server: 'salesforce', version }); // SF_USAGE_DIR; unset = off
+usage.writeCatalog(tools.map((t) => ({ name: t.name, kind: t.isWrite ? 'write' : 'read' })));
+usage.record({ tool, outcome: 'ok', duration_ms, user, user_kind: 'user', tier, arg_keys: args, question });
+```
+
+- One file per UTC day, `usage-YYYY-MM-DD.jsonl`, mode 0600, kept 14 days.
+- An event is call metadata only: tool, person, outcome, timing, sizes and argument NAMES.
+  Argument values and results are never accepted. A question is stored only after
+  `redactQuestion`, which strips emails, phones, long numbers, Salesforce Ids, URLs and
+  amounts. It does not strip names.
+- `record` never throws. `stats()` gives the written and error counters for a health tool.
+- The event shape is `spec/usage_event_v1.json`, and redaction is pinned by
+  `spec/redaction_fixtures_v1.json`. Both files are shared byte for byte with
+  bb-mcp-identity-py, and the tests in each repo pin their hashes.
+
 ## Develop
 
 ```bash
