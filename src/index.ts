@@ -38,4 +38,29 @@ export type { ProtectedResourceMetadata } from './metadata.js';
 export { extractBearer, IdentityGate, pathOnly, PRM_PATH } from './http.js';
 export type { GateOptions, GateOutcome, LegacyCheck, Minter } from './http.js';
 
-export const VERSION = '0.1.1';
+export {
+  FIELD_ORDER,
+  KINDS,
+  OUTCOMES,
+  QUESTION_LIMIT,
+  redactQuestion,
+  USAGE_RETENTION_DAYS,
+  USAGE_SCHEMA_VERSION,
+  UsageLedger,
+  USER_KINDS,
+  userSlug,
+  WRITE_MODES,
+} from './usage.js';
+export type {
+  CatalogTool,
+  UsageEvent,
+  UsageFields,
+  UsageKind,
+  UsageLedgerOptions,
+  UsageOutcome,
+  UsageStats,
+  UsageUserKind,
+  UsageWriteMode,
+} from './usage.js';
+
+export const VERSION = '0.1.2';

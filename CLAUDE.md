@@ -22,7 +22,11 @@ same settings names, the same deny rules and the same reason strings.
    the broker's protocol document, in one change.
 5. **Tests use keys generated per run.** No private key, token or secret is
    ever committed, not even a "test" one.
-6. **PR-only to main**, with a `[Unreleased]` bullet in `CHANGELOG.md`.
+6. **The usage ledger stays metadata-only.** `src/usage.ts` never accepts argument
+   values or results, and it never imports the auth code. `spec/` is shared byte
+   for byte with the Python library: change both repos together and update both
+   hash pins.
+7. **PR-only to main**, with a `[Unreleased]` bullet in `CHANGELOG.md`.
 
 ## Gate
 
