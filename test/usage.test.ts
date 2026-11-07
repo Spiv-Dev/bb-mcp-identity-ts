@@ -1,5 +1,6 @@
 /** The usage ledger: event shape, redaction, never-throw, rotation and prune. All synthetic. */
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -18,8 +19,8 @@ const FIXTURES = JSON.parse(readFileSync(join(SPEC, 'redaction_fixtures_v1.json'
 };
 
 // Shared with bb-mcp-identity-py, which pins the same hashes. Change both repos together.
-const SCHEMA_SHA256 = '6494bd8175dbf76f0e46b081e0039d0a058e593e89a3f6647cb8ddcbdef2a7a4';
-const FIXTURES_SHA256 = '26a04dfee7c4cc83be4954bdbc116758a29bbd081d90af34f239a3df91511ef6';
+const SCHEMA_SHA256 = '57cec545cecf3b44c163bd2501e0dbafe5319ace31cc572d1d9cda14a8b69789';
+const FIXTURES_SHA256 = '5f894707aaadb89f55b2e5e2d55993526e31493adbb009ac8ced193feb929ee2';
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -323,5 +324,67 @@ describe('redactQuestion', () => {
       expect(out).not.toMatch(/[0-9]{9,}/);
       for (const tok of planted) expect(out).not.toContain(tok);
     }
+  });
+});
+
+describe('review hardening', () => {
+  it('keeps free text out of coded fields', () => {
+    const d = tmp();
+    const led = new UsageLedger(d, { server: 'testapp' });
+    led.record({
+      tool: 'dev ping﻿!',
+      outcome: 'error',
+      duration_ms: 1,
+      error_code: 'Could not find jane@acme.co.za',
+      correlation_id: 'has spaces in it',
+      tier: 'Admin Tier!',
+      client: 'python-requests (+mailto:ops@acme.co.za)',
+      arg_keys: ['8001015009087', 'jane.doe.acme.co.za', 'acct12345', 'repo', 'dry_run'],
+    });
+    const [ev] = readLines(d);
+    checkSchema(ev!);
+    expect(ev).toMatchObject({ tool: 'devping', error_code: 'unclassified', correlation_id: null, tier: null, arg_keys: ['dry_run', 'repo'] });
+    expect(ev!['client']).not.toContain('acme.co.za');
+  });
+
+  it.each([
+    [1e20, null],
+    [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    [0.49999999999999994, 0],
+    [2.5, 3],
+    [1e300, null],
+  ])('bounds response_bytes %s -> %s', (value, expected) => {
+    const d = tmp();
+    const led = new UsageLedger(d, { server: 'testapp' });
+    led.record({ tool: 't', outcome: 'ok', duration_ms: 1, response_bytes: value });
+    expect(readLines(d)[0]!['response_bytes']).toBe(expected);
+  });
+
+  it('caps duration at the store integer', () => {
+    const d = tmp();
+    const led = new UsageLedger(d, { server: 'testapp' });
+    led.record({ tool: 't', outcome: 'ok', duration_ms: 1e12 });
+    expect(readLines(d)[0]!['duration_ms']).toBe(2 ** 31 - 1);
+  });
+
+  it('takes names from a Map and nothing from other objects', () => {
+    const d = tmp();
+    const led = new UsageLedger(d, { server: 'testapp' });
+    led.record({ tool: 'a', outcome: 'ok', duration_ms: 1, arg_keys: new Map([['repo', 'v']]) });
+    led.record({ tool: 'b', outcome: 'ok', duration_ms: 1, arg_keys: new String('abc') });
+    expect(readLines(d).map((e) => e['arg_keys'])).toEqual([['repo'], []]);
+  });
+
+  it.each([
+    ['commas', '1,'.repeat(25000)],
+    ['letters', 'a'.repeat(50000)],
+    ['ats', 'x@'.repeat(25000)],
+    ['spaced', '1 '.repeat(25000)],
+    ['rands', 'R1,'.repeat(20000)],
+  ])('stays fast on a huge input (%s)', (_label, blob) => {
+    const t = performance.now();
+    const out = redactQuestion(blob);
+    expect(performance.now() - t).toBeLessThan(1000);
+    expect(out === null || Array.from(out).length <= QUESTION_LIMIT).toBe(true);
   });
 });

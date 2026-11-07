@@ -133,9 +133,18 @@ const MAX: Record<string, number> = {
   parent_correlation_id: 128,
 };
 const MAX_ARG_KEYS = 64;
-const MAX_ARG_KEY_LEN = 64;
 
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
+// Argument names are identifiers; a key with 5+ digits is more likely a value than a name.
+const ARG_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const NAME_STRIP_RE = /[^A-Za-z0-9_.:-]/g;
+const CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const TIER_RE = /^[a-z0-9_-]{1,32}$/;
+const VERSION_STRIP_RE = /[^A-Za-z0-9_.+-]/g;
+/** The largest integer JavaScript keeps exactly. */
+export const MAX_COUNT = Number.MAX_SAFE_INTEGER;
+/** The store's integer column. */
+export const MAX_DURATION_MS = 2 ** 31 - 1;
 const SLUG_STRIP_RE = /[^a-z0-9._-]/g;
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 // eslint-disable-next-line no-control-regex
@@ -144,48 +153,95 @@ const FILE_RE = /^usage-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 
 // --- redaction -------------------------------------------------------------------------------
 //
-// The same patterns, in the same order, as bb-mcp-identity-py (bb_mcp_identity/usage.py); both
-// are held to spec/redaction_fixtures_v1.json. Classes are spelt out ([0-9], [ \t]) so the two
-// engines match exactly the same text.
+// The same steps and patterns, in the same order, as bb-mcp-identity-py (bb_mcp_identity/usage.py);
+// both are held to spec/redaction_fixtures_v1.json. Classes are spelt out ([0-9], [ \t]) so the two
+// engines match exactly the same text, and every pattern starts only at a token boundary so a long
+// input cannot make it quadratic.
+//
+// Steps: drop invisible characters, turn every kind of space into ' ', cut the input to PRE_LIMIT
+// characters at a space (so no token is split), redact, then cut to the limit.
 
-const WS = '[ \\t\\r\\n\\f\\v\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]';
-const SP = '[ \\t\\u00a0]';
-const NUM = `[0-9](?:[0-9,.]|${SP}(?=[0-9]))*`;
-const SCALE = '(?:k|m|bn|million|thousand|mil)';
+export const PRE_LIMIT = 1200;
+
+const WS = '[ \\t\\r\\n\\f\\v\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]';
+const WS_RE = new RegExp(`${WS}+`, 'g');
+const INVISIBLE_RE = /[\u00ad\u200b-\u200d\u2060\ufeff]/g;
+const SP = '[ \\t]';
+const NUM = `[0-9](?:[0-9]|[,.][0-9]|${SP}(?=[0-9]))*`;
+const SCALE = '(?:k|mn|mm|m|bn|million|billion|thousand|mil|miljoen)';
+const BARE_SCALE = '(?:k|mn|mm|bn|million|billion|miljoen)';
+const CUR = '(?:ZAR|USD|EUR|GBP|rand|dollars?|euros?)';
+const NOT_IN_NUMBER = '(?<![0-9A-Za-z,.])';
+const EMAIL_CH = '[^ @<>()\\[\\],;:"]';
 
 const REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/\b(?:https?:\/\/|www\.)[^ \t\r\n]+/gi, '[url]'],
-  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, '[email]'],
-  [/(?:\+27|\b0)[ -]?\(?[0-9]{2}\)?[ -]?[0-9]{3}[ -]?[0-9]{4}\b/g, '[phone]'],
-  [/\+[0-9]{1,3}(?:[ -]?[0-9]){7,12}\b/g, '[phone]'],
-  [/\b[0-9](?:[ -]?[0-9]){12,18}\b/g, '[number]'],
-  [/\b[0-9]{9,}\b/g, '[number]'],
-  [new RegExp(`(?:\\b(?:R|ZAR|USD|EUR|GBP)${SP}?|[$\\u20ac\\u00a3]${SP}?)${NUM}(?:${SP}?${SCALE}\\b)?`, 'gi'), '[amount]'],
-  [new RegExp(`\\b${NUM}${SP}?(?:ZAR|USD|EUR|GBP|rand)\\b`, 'gi'), '[amount]'],
-  [new RegExp(`\\b[0-9]+(?:[.,][0-9]+)?${SP}?(?:k|m|bn)\\b`, 'gi'), '[amount]'],
+  [/\b[A-Za-z][A-Za-z0-9+.-]{1,15}:\/\/[^ ]+|\bwww\.[^ ]+/gi, '[url]'],
+  [new RegExp(`(?<![^ <>()\\[\\],;:"'])${EMAIL_CH}+@${EMAIL_CH}+\\.[^ @<>()\\[\\],;:".]{2,}`, 'g'), '[email]'],
+  [/(?<![^ (<["'])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.[A-Za-z]{2,}\/[^ ]*/g, '[url]'],
+  // Long opaque tokens (API keys, session tokens): 24+ letters/digits/-/_ with both a digit and a letter.
+  [/(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])/g, '[secret]'],
+  // Amounts: a currency marker before or after the figure, a scaled figure, or grouped thousands.
+  [new RegExp(`(?:\\b(?:R|ZAR|USD|EUR|GBP)|[$\\u20ac\\u00a3])${SP}?${NUM}(?:${SP}?${SCALE})?(?![0-9A-Za-z])`, 'gi'), '[amount]'],
+  [new RegExp(`${NOT_IN_NUMBER}${NUM}${SP}?(?:${SCALE}${SP}?)?${CUR}\\b`, 'gi'), '[amount]'],
+  [new RegExp(`${NOT_IN_NUMBER}[0-9]+(?:[.,][0-9]+)?${SP}?${BARE_SCALE}\\b`, 'gi'), '[amount]'],
+  [new RegExp(`${NOT_IN_NUMBER}[0-9]{1,3}(?:,[0-9]{3})+(?:\\.[0-9]+)?(?![0-9])`, 'g'), '[amount]'],
 ];
 
+// Phones, ID and account numbers, cards: a run of 9+ digits with up to three separators
+// (space . - ( )) between them. Dates and a list of years do not count.
+const DIGIT_RUN_RE = /(?<![0-9A-Za-z])\+?\(?[0-9](?:[ .()-]{0,3}[0-9]){8,}/g;
+const ISO_DATE_RE = /(?:19|20)[0-9]{2}-[0-9]{2}-[0-9]{2}/g;
+const YEAR_RE = /^(?:19|20)[0-9]{2}$/;
+// Letter-prefixed document numbers (passports, permits): 1-2 letters then 6-9 digits.
+const DOCNUM_RE = /\b[A-Za-z]{1,2}[0-9]{6,9}\b/g;
+// Salesforce Ids: 15 or 18 letters/digits with at least three digits and a letter.
 const SFID_RE = /\b[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?\b/g;
-const WS_RE = new RegExp(`${WS}+`, 'g');
+
+function digitCount(s: string): number {
+  return (s.match(/[0-9]/g) ?? []).length;
+}
+
+function digitRun(tok: string): string {
+  const groups = tok.split(/[^0-9]+/).filter(Boolean);
+  if (groups.length > 0 && groups.every((g) => YEAR_RE.test(g))) return tok; // a list of years
+  if (digitCount(tok.replace(ISO_DATE_RE, '')) < 9) return tok; // dates and a time, not a number
+  return '+0('.includes(tok.charAt(0)) ? '[phone]' : '[number]';
+}
 
 function clean(s: string): string {
-  return s.replace(LONE_SURROGATE_RE, '�').replace(CONTROL_RE, '');
+  return s.replace(LONE_SURROGATE_RE, '\ufffd').replace(CONTROL_RE, '');
+}
+
+/** Collapse every kind of space to one ' ' and trim (the same in Python and JavaScript). */
+function trimWs(s: string): string {
+  return s.replace(INVISIBLE_RE, '').replace(WS_RE, ' ').replace(/^ +| +$/g, '');
+}
+
+function cutPoints(s: string, n: number): string {
+  const points = Array.from(s);
+  return points.length > n ? points.slice(0, n).join('') : s;
 }
 
 /**
- * Strip contact details, numbers, Ids and amounts from a question, then cut it to `limit`
- * characters (code points). Redaction runs first, so a cut never leaves half an address. Names
- * are NOT removed; the store keeps questions separately and for 90 days for that reason.
+ * Strip contact details, numbers, Ids, links, tokens and amounts from a question, then cut it to
+ * `limit` characters (code points). Names are NOT removed; the store keeps questions separately
+ * and for 90 days for that reason. Returns null for a blank or non-string question.
  */
 export function redactQuestion(text: unknown, limit: number = QUESTION_LIMIT): string | null {
   if (typeof text !== 'string') return null;
-  let s = clean(text);
+  let s = trimWs(clean(text));
+  if (Array.from(s).length > PRE_LIMIT) {
+    const cut = cutPoints(s, PRE_LIMIT);
+    const space = cut.lastIndexOf(' ');
+    s = space > 0 && Array.from(cut.slice(0, space)).length > PRE_LIMIT / 2 ? cut.slice(0, space) : cut;
+  }
   for (const [pattern, placeholder] of REDACTIONS) s = s.replace(pattern, placeholder);
-  s = s.replace(SFID_RE, (tok) => (/[0-9]/.test(tok) && /[A-Za-z]/.test(tok) ? '[id]' : tok));
-  s = s.replace(WS_RE, ' ').replace(/^ +| +$/g, '');
+  s = s.replace(DIGIT_RUN_RE, digitRun);
+  s = s.replace(DOCNUM_RE, '[id]');
+  s = s.replace(SFID_RE, (tok) => (digitCount(tok) >= 3 && /[A-Za-z]/.test(tok) ? '[id]' : tok));
+  s = trimWs(s);
   if (!s) return null;
-  const points = Array.from(s);
-  return points.length > limit ? points.slice(0, limit).join('').replace(/ +$/, '') : s;
+  return Array.from(s).length > limit ? cutPoints(s, limit).replace(/ +$/, '') : s;
 }
 
 /** The fleet's person key: the lowercase local part of a username or email. */
@@ -196,10 +252,10 @@ export function userSlug(username: unknown): string | null {
   return slug || null;
 }
 
-function short(value: unknown, field: string): string | null {
+/** A tool / server / domain name: only [A-Za-z0-9_.:-] survive, so no free text gets in. */
+function name(value: unknown, field: string): string | null {
   if (typeof value !== 'string') return null;
-  const s = clean(value).trim();
-  return Array.from(s).slice(0, MAX[field]).join('') || null;
+  return value.replace(NAME_STRIP_RE, '').slice(0, MAX[field]) || null;
 }
 
 function utcDay(ts: string): string {
@@ -230,8 +286,8 @@ export class UsageLedger {
 
   constructor(dir: string | null | undefined, opts: UsageLedgerOptions) {
     this.dir = dir ? dir : null;
-    this.server = short(opts.server, 'server') ?? 'unknown';
-    this.version = short(opts.version ?? '', 'server_version') ?? '';
+    this.server = name(opts.server, 'server') ?? 'unknown';
+    this.version = (typeof opts.version === 'string' ? opts.version.replace(VERSION_STRIP_RE, '') : '').slice(0, MAX['server_version']);
     this.retentionDays = Math.max(1, Math.floor(opts.retentionDays ?? USAGE_RETENTION_DAYS));
   }
 
@@ -265,21 +321,21 @@ export class UsageLedger {
       ts: ts.toISOString(),
       server: this.server,
       server_version: this.version,
-      tool: short(fields.tool, 'tool') ?? 'unknown',
+      tool: name(fields.tool, 'tool') ?? 'unknown',
       kind: this.oneOf(fields.kind ?? 'read', KINDS, 'read'),
       user: userSlug(fields.user),
       user_kind: this.oneOf(fields.user_kind ?? 'unknown', USER_KINDS, 'unknown'),
-      tier: short(fields.tier, 'tier'),
-      client: short(fields.client, 'client'),
+      tier: typeof fields.tier === 'string' && TIER_RE.test(fields.tier.toLowerCase()) ? fields.tier.toLowerCase() : null,
+      client: redactQuestion(fields.client, MAX['client']),
       outcome: this.oneOf(fields.outcome, OUTCOMES, 'error'),
-      error_code: short(fields.error_code, 'error_code'),
-      duration_ms: this.count(fields.duration_ms, 0) ?? 0,
+      error_code: this.code(fields.error_code),
+      duration_ms: Math.min(this.count(fields.duration_ms, 0) ?? 0, MAX_DURATION_MS),
       response_bytes: this.count(fields.response_bytes, null),
       arg_keys: this.argKeys(fields.arg_keys),
       write_mode: this.oneOf(fields.write_mode ?? 'n/a', WRITE_MODES, 'n/a'),
-      via_tool: short(fields.via_tool, 'via_tool'),
-      correlation_id: short(fields.correlation_id, 'correlation_id'),
-      parent_correlation_id: short(fields.parent_correlation_id, 'parent_correlation_id'),
+      via_tool: name(fields.via_tool, 'via_tool'),
+      correlation_id: this.id(fields.correlation_id),
+      parent_correlation_id: this.id(fields.parent_correlation_id),
       question: redactQuestion(fields.question),
     };
     return ev;
@@ -320,9 +376,9 @@ export class UsageLedger {
     try {
       const rows: Array<{ name: string; kind: UsageKind; domain: string | null }> = [];
       for (const t of tools) {
-        const name = short(t.name, 'tool');
-        if (!name) continue;
-        rows.push({ name, kind: this.oneOf(t.kind ?? 'read', KINDS, 'read'), domain: short(t.domain, 'tool') });
+        const toolName = name(t.name, 'tool');
+        if (!toolName) continue;
+        rows.push({ name: toolName, kind: this.oneOf(t.kind ?? 'read', KINDS, 'read'), domain: name(t.domain, 'tool') });
       }
       rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       const doc = {
@@ -376,9 +432,27 @@ export class UsageLedger {
 
   private count(value: unknown, fallback: number | null): number | null {
     if (value === null || value === undefined || typeof value === 'boolean') return fallback;
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.round(value);
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= MAX_COUNT) return Math.round(value);
+    if (typeof value === 'bigint' && value >= 0n && value <= BigInt(MAX_COUNT)) return Number(value);
     this.droppedFields += 1;
     return fallback;
+  }
+
+  private code(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') {
+      const v = value.slice(0, MAX['error_code']);
+      if (CODE_RE.test(v)) return v;
+    }
+    this.droppedFields += 1;
+    return 'unclassified'; // free text (a message) never goes in as a code
+  }
+
+  private id(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string' && ID_RE.test(value)) return value;
+    this.droppedFields += 1;
+    return null;
   }
 
   private argKeys(value: unknown): string[] {
@@ -386,14 +460,16 @@ export class UsageLedger {
     let names: unknown[];
     if (Array.isArray(value)) names = value;
     else if (value instanceof Set) names = [...(value as Set<unknown>)];
-    else if (typeof value === 'object') names = Object.keys(value as object); // an args object: keep the names only
-    else {
+    else if (value instanceof Map) names = [...(value as Map<unknown, unknown>).keys()];
+    else if (typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      names = Object.keys(value as object); // an args object: keep the names only
+    } else {
       this.droppedFields += 1;
       return [];
     }
     const keys = new Set<string>();
     for (const k of names) {
-      if (typeof k === 'string' && k && !k.startsWith('_') && k.length <= MAX_ARG_KEY_LEN && NAME_RE.test(k)) keys.add(k);
+      if (typeof k === 'string' && ARG_RE.test(k) && digitCount(k) < 5) keys.add(k);
     }
     return [...keys].sort().slice(0, MAX_ARG_KEYS);
   }
